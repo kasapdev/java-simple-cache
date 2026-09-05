@@ -1,6 +1,6 @@
 # java-simple-cache
 
-[![CI](https://github.com/kasapdev/java-simple-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/kasapdev/java-simple-cache/actions/workflows/ci.yml)
+[![CI](https://github.com/kasapdev/java-simple-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/kasapdev/java-simple-cache/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) ![Java](https://img.shields.io/badge/Java-17-ED8B00?logo=openjdk&logoColor=white)
 
 A generic, thread-safe in-memory `LruCache<K, V>` for Java with a fixed capacity (least-recently-used eviction) and optional per-entry time-to-live (TTL) expiry. Zero dependencies, pure Java 17, no build tool required.
 
