@@ -17,7 +17,53 @@ public final class LruCacheTest {
         testNegativeOrZeroTtlMeansNoExpiry();
         testCapacityOneAlwaysEvictsPrevious();
         testConcurrentAccessDoesNotCorruptState();
+        testInvalidCapacityRejected();
+        testSizeCountsExpiredButNotYetEvictedEntries();
+        testRePuttingExistingKeyDoesNotEvictOthers();
         TestKit.finish();
+    }
+
+    private static void testInvalidCapacityRejected() {
+        boolean threwZero = false;
+        try {
+            new LruCache<String, String>(0);
+        } catch (IllegalArgumentException e) {
+            threwZero = true;
+        }
+        TestKit.check("capacity 0 is rejected", threwZero);
+
+        boolean threwNegative = false;
+        try {
+            new LruCache<String, String>(-1);
+        } catch (IllegalArgumentException e) {
+            threwNegative = true;
+        }
+        TestKit.check("negative capacity is rejected", threwNegative);
+    }
+
+    private static void testSizeCountsExpiredButNotYetEvictedEntries() throws InterruptedException {
+        // Per the documented contract, size() counts entries that have expired by TTL but
+        // have not yet been physically purged (purging only happens lazily inside get()).
+        LruCache<String, String> cache = new LruCache<>(10, 20L);
+        cache.put("soon-expired", "value");
+        TestKit.check("size reflects the entry right after put", cache.size() == 1);
+        Thread.sleep(60);
+        TestKit.check("size still counts the expired-but-not-yet-evicted entry", cache.size() == 1);
+        TestKit.check("get() purges the expired entry and reports it absent", cache.get("soon-expired") == null);
+        TestKit.check("size reflects the purge after get() evicted the expired entry", cache.size() == 0);
+    }
+
+    private static void testRePuttingExistingKeyDoesNotEvictOthers() {
+        LruCache<String, String> cache = new LruCache<>(3);
+        cache.put("a", "A");
+        cache.put("b", "B");
+        cache.put("c", "C");
+        // Overwriting an already-present key must not grow past capacity or evict anyone.
+        cache.put("a", "A-updated");
+        TestKit.check("size is unchanged after re-putting an existing key", cache.size() == 3);
+        TestKit.check("re-put key has the updated value", "A-updated".equals(cache.get("a")));
+        TestKit.check("other keys are untouched by re-putting an existing key (b)", "B".equals(cache.get("b")));
+        TestKit.check("other keys are untouched by re-putting an existing key (c)", "C".equals(cache.get("c")));
     }
 
     private static void testBasicPutGet() {
