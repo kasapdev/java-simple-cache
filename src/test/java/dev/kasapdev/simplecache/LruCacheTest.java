@@ -20,7 +20,60 @@ public final class LruCacheTest {
         testInvalidCapacityRejected();
         testSizeCountsExpiredButNotYetEvictedEntries();
         testRePuttingExistingKeyDoesNotEvictOthers();
+        testStatsAreZeroBeforeAnyGet();
+        testHitAndMissCountsWithExactExpectedValues();
         TestKit.finish();
+    }
+
+    private static void testStatsAreZeroBeforeAnyGet() {
+        LruCache<String, String> cache = new LruCache<>(3);
+        TestKit.check("hitCount is 0 before any get", cache.hitCount() == 0);
+        TestKit.check("missCount is 0 before any get", cache.missCount() == 0);
+        TestKit.check("hitRate is 0.0 before any get (no divide-by-zero)", cache.hitRate() == 0.0);
+        cache.put("a", "A");
+        TestKit.check("put alone does not affect hitCount", cache.hitCount() == 0);
+        TestKit.check("put alone does not affect missCount", cache.missCount() == 0);
+    }
+
+    private static void testHitAndMissCountsWithExactExpectedValues() {
+        // Capacity 2, no TTL. Hand-tracked sequence of gets, mixing hits, misses,
+        // and a miss caused by capacity eviction.
+        LruCache<String, String> cache = new LruCache<>(2);
+        cache.put("a", "A");
+        cache.put("b", "B");
+
+        cache.get("a");        // 1: hit  (a present)                    -> hits=1 misses=0
+        cache.get("b");        // 2: hit  (b present)                    -> hits=2 misses=0
+        cache.get("missing");  // 3: miss (never put)                    -> hits=2 misses=1
+
+        // Capacity is 2 and recency order right now (oldest -> newest) is a, b
+        // (both gets above refreshed recency in that order). Inserting "c" evicts "a".
+        cache.put("c", "C");
+
+        cache.get("a");        // 4: miss (evicted by capacity)          -> hits=2 misses=2
+        cache.get("b");        // 5: hit  (survived eviction)            -> hits=3 misses=2
+        cache.get("c");        // 6: hit  (just inserted)                -> hits=4 misses=2
+        cache.get("missing");  // 7: miss (still never put)              -> hits=4 misses=3
+
+        // Overwriting an existing key is not a get, so it must not move the counters.
+        cache.put("b", "B-updated");
+        cache.get("b");        // 8: hit  (updated value, still present) -> hits=5 misses=3
+
+        TestKit.check("hitCount matches hand-calculated expected value", cache.hitCount() == 5);
+        TestKit.check("missCount matches hand-calculated expected value", cache.missCount() == 3);
+        // hitRate = hits / (hits + misses) = 5 / 8 = 0.625
+        TestKit.check("hitRate matches hand-calculated expected value", cache.hitRate() == 0.625);
+
+        // clear() must not reset lifetime stats (documented, Guava-style behavior).
+        cache.clear();
+        TestKit.check("hitCount is unchanged by clear()", cache.hitCount() == 5);
+        TestKit.check("missCount is unchanged by clear()", cache.missCount() == 3);
+        TestKit.check("hitRate is unchanged by clear()", cache.hitRate() == 0.625);
+
+        // A get() after clear() on a now-absent key is a miss, and does update stats.
+        cache.get("b");        // 9: miss (cleared)                      -> hits=5 misses=4
+        TestKit.check("missCount increments for a get() after clear()", cache.missCount() == 4);
+        TestKit.check("hitRate reflects the post-clear miss: 5 / 9", cache.hitRate() == 5.0 / 9.0);
     }
 
     private static void testInvalidCapacityRejected() {

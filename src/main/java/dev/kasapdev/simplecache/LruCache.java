@@ -22,6 +22,15 @@ import java.util.concurrent.locks.ReentrantLock;
  * <p>All public methods are safe for concurrent use from multiple threads; a
  * single {@link ReentrantLock} guards all access to the underlying map.
  *
+ * <p>The cache also tracks lifetime hit/miss statistics via {@link #hitCount()},
+ * {@link #missCount()} and {@link #hitRate()}. Every call to {@link #get(Object)}
+ * counts as either a hit (a live, non-expired entry was found) or a miss (the key
+ * was absent, or present but expired). These counters are cumulative for the life
+ * of the cache instance: like Guava's {@code CacheStats}, they measure historical
+ * hit effectiveness and are deliberately <em>not</em> reset by {@link #put(Object, Object)},
+ * {@link #put(Object, Object, long)} or {@link #clear()} - clearing the cache's
+ * contents is a different operation from resetting how well it has been performing.
+ *
  * @param <K> the type of keys maintained by this cache
  * @param <V> the type of mapped values
  */
@@ -34,6 +43,8 @@ public final class LruCache<K, V> {
     private final long defaultTtlMillis;
     private final LinkedHashMap<K, Entry<V>> map;
     private final ReentrantLock lock = new ReentrantLock();
+    private long hitCount;
+    private long missCount;
 
     /**
      * Creates a cache with the given fixed capacity and no default TTL
@@ -73,18 +84,25 @@ public final class LruCache<K, V> {
     /**
      * Returns the value associated with {@code key}, or {@code null} if absent
      * or expired. A successful lookup marks the entry as most-recently-used.
+     *
+     * <p>Every call counts toward this cache's hit/miss statistics: finding a
+     * live entry increments {@link #hitCount()}, while a missing or expired
+     * entry increments {@link #missCount()}.
      */
     public V get(K key) {
         lock.lock();
         try {
             Entry<V> entry = map.get(key);
             if (entry == null) {
+                missCount++;
                 return null;
             }
             if (isExpired(entry)) {
                 map.remove(key);
+                missCount++;
                 return null;
             }
+            hitCount++;
             return entry.value;
         } finally {
             lock.unlock();
@@ -127,11 +145,53 @@ public final class LruCache<K, V> {
         }
     }
 
-    /** Removes all entries from the cache. */
+    /** Removes all entries from the cache. Does not reset hit/miss statistics; see the class javadoc. */
     public void clear() {
         lock.lock();
         try {
             map.clear();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Returns the number of {@link #get(Object)} calls that found a live,
+     * non-expired entry, since this cache was created.
+     */
+    public long hitCount() {
+        lock.lock();
+        try {
+            return hitCount;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Returns the number of {@link #get(Object)} calls that found no entry
+     * (absent or expired), since this cache was created.
+     */
+    public long missCount() {
+        lock.lock();
+        try {
+            return missCount;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Returns the ratio of hits to total {@link #get(Object)} calls
+     * ({@code hitCount / (hitCount + missCount)}), as a value between
+     * {@code 0.0} and {@code 1.0} inclusive. Returns {@code 0.0} if
+     * {@code get} has never been called, to avoid dividing by zero.
+     */
+    public double hitRate() {
+        lock.lock();
+        try {
+            long total = hitCount + missCount;
+            return total == 0 ? 0.0 : (double) hitCount / total;
         } finally {
             lock.unlock();
         }
