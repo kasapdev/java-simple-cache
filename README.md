@@ -80,6 +80,17 @@ public class LookupExample {
 }
 ```
 
+## Loading on a miss
+
+`computeIfAbsent` replaces the usual "get, check for null, load, put" sequence
+and guarantees the loader runs once even when many threads ask for the same key
+at the same time:
+
+```java
+LruCache<Long, User> users = new LruCache<>(500, 60_000L);
+User user = users.computeIfAbsent(42L, id -> repository.load(id));
+```
+
 ## Cache Statistics
 
 Every `LruCache` tracks lifetime hit/miss counts, so you can see how effective it
@@ -126,6 +137,10 @@ public class StatsExample {
 | `void put(K key, V value)` | Inserts/updates `key` using the cache's default TTL. Evicts the least-recently-used entry if the cache is full and `key` is new. |
 | `void put(K key, V value, long ttlMillis)` | Inserts/updates `key` with an explicit TTL override for this entry only. `ttlMillis <= 0` means this entry never expires. |
 | `int size()` | Current number of entries held (including any expired-but-not-yet-evicted entries). |
+| `V remove(K key)` | Removes `key` and returns its live value, or `null` if absent or expired. Not counted as a hit or miss. |
+| `V computeIfAbsent(K key, Function<? super K, ? extends V> loader)` | Returns the cached value, or computes it with `loader`, stores it (default TTL) and returns it. The loader runs under the cache lock, so concurrent callers for one key trigger a single load. A `null` result or exception stores nothing. Counts as one hit or miss. |
+| `V computeIfAbsent(K key, Function<? super K, ? extends V> loader, long ttlMillis)` | Same, with an explicit TTL for the computed value (`<= 0` means it never expires). |
+| `List<K> keys()` | Snapshot of the live keys from least- to most-recently-used (eviction order). Does not refresh recency or affect statistics. |
 | `void clear()` | Removes all entries. Does not reset hit/miss statistics. |
 | `long hitCount()` | Lifetime number of `get` calls that found a live entry. |
 | `long missCount()` | Lifetime number of `get` calls that found nothing (absent or expired). |

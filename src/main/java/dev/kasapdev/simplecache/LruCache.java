@@ -1,8 +1,12 @@
 package dev.kasapdev.simplecache;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
 
 /**
  * A thread-safe, generic LRU (Least Recently Used) cache with a fixed capacity
@@ -192,6 +196,105 @@ public final class LruCache<K, V> {
         try {
             long total = hitCount + missCount;
             return total == 0 ? 0.0 : (double) hitCount / total;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Removes {@code key} from the cache and returns the value that was stored, or
+     * {@code null} if the key was absent or its entry had already expired.
+     *
+     * <p>Removal is not a lookup: it does not affect the hit/miss statistics.
+     *
+     * @param key the key to remove
+     * @return the removed live value, or {@code null}
+     */
+    public V remove(K key) {
+        lock.lock();
+        try {
+            Entry<V> entry = map.remove(key);
+            if (entry == null || isExpired(entry)) {
+                return null;
+            }
+            return entry.value;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Returns the value for {@code key}, computing and caching it with
+     * {@code loader} if there is no live entry, using the cache's default TTL.
+     * See {@link #computeIfAbsent(Object, Function, long)}.
+     *
+     * @param key    the key to look up
+     * @param loader computes the value on a miss
+     * @return the cached or newly computed value, or {@code null} if the loader returned {@code null}
+     */
+    public V computeIfAbsent(K key, Function<? super K, ? extends V> loader) {
+        return computeIfAbsent(key, loader, defaultTtlMillis);
+    }
+
+    /**
+     * Returns the value for {@code key}; if there is no live entry, computes it with
+     * {@code loader}, stores it with the given TTL and returns it.
+     *
+     * <p>The whole operation runs under the cache's lock, so concurrent callers for the
+     * same key never run the loader more than once: the others wait and then see the
+     * stored value. The flip side is that a slow loader blocks the whole cache, and the
+     * loader must not call back into this cache. The call counts as one hit or one miss
+     * in the statistics, like {@link #get(Object)}. If the loader returns {@code null}
+     * nothing is stored (so it will be called again next time); if it throws, the
+     * exception propagates and nothing is stored.
+     *
+     * @param key       the key to look up
+     * @param loader    computes the value on a miss
+     * @param ttlMillis TTL for a newly computed value; {@code <= 0} means it never expires
+     * @return the cached or newly computed value, or {@code null} if the loader returned {@code null}
+     */
+    public V computeIfAbsent(K key, Function<? super K, ? extends V> loader, long ttlMillis) {
+        Objects.requireNonNull(loader, "loader");
+        lock.lock();
+        try {
+            Entry<V> entry = map.get(key);
+            if (entry != null) {
+                if (!isExpired(entry)) {
+                    hitCount++;
+                    return entry.value;
+                }
+                map.remove(key);
+            }
+            missCount++;
+            V value = loader.apply(key);
+            if (value != null) {
+                put(key, value, ttlMillis);
+            }
+            return value;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Returns a snapshot of the keys of all live (non-expired) entries, ordered from
+     * least-recently-used to most-recently-used, i.e. the order in which they would be
+     * evicted. Taking the snapshot does not refresh any entry's recency and does not
+     * affect the hit/miss statistics; later changes to the cache are not reflected in
+     * the returned list.
+     *
+     * @return a new list of the live keys, least-recently-used first
+     */
+    public List<K> keys() {
+        lock.lock();
+        try {
+            List<K> keys = new ArrayList<>(map.size());
+            for (Map.Entry<K, Entry<V>> e : map.entrySet()) {
+                if (!isExpired(e.getValue())) {
+                    keys.add(e.getKey());
+                }
+            }
+            return keys;
         } finally {
             lock.unlock();
         }
