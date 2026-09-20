@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.3.0] - 2026-09-20
+
+### Added
+
+- `V remove(K key)` - removes an entry and returns its live value (or `null`
+  if absent/expired). Not counted as a hit or miss.
+- `V computeIfAbsent(K key, Function<? super K, ? extends V> loader)` and an
+  overload taking an explicit `long ttlMillis` - returns the cached value or
+  computes, stores and returns it. Runs under the cache lock, so concurrent
+  callers for the same key run the loader once. Counts as one hit or miss. A
+  `null` result or an exception stores nothing.
+- `List<K> keys()` - snapshot of live keys, least- to most-recently-used, with
+  no effect on recency or statistics.
+
 ## [1.2.0] - 2026-09-07
 
 ### Added

@@ -22,6 +22,10 @@ public final class LruCacheTest {
         testRePuttingExistingKeyDoesNotEvictOthers();
         testStatsAreZeroBeforeAnyGet();
         testHitAndMissCountsWithExactExpectedValues();
+        testRemove();
+        testComputeIfAbsent();
+        testComputeIfAbsentRunsLoaderOnceUnderContention();
+        testKeysIsAnOrderedSideEffectFreeSnapshot();
         TestKit.finish();
     }
 
@@ -240,5 +244,144 @@ public final class LruCacheTest {
         pool.shutdown();
         TestKit.check("concurrent access from multiple threads raises no exceptions", !sawException[0]);
         TestKit.check("cache never exceeds configured capacity under concurrent load", cache.size() <= 50);
+    }
+
+    private static void testRemove() throws Exception {
+        LruCache<String, String> cache = new LruCache<>(3);
+        cache.put("a", "A");
+        cache.put("b", "B");
+
+        TestKit.check("remove returns the stored value", "A".equals(cache.remove("a")));
+        TestKit.check("remove drops the entry (size decrements)", cache.size() == 1);
+        TestKit.check("removed key is gone", cache.get("a") == null);
+        TestKit.check("remove of an absent key returns null", cache.remove("zzz") == null);
+
+        cache.put("short", "S", 30L);
+        Thread.sleep(80);
+        TestKit.check("remove of an expired entry returns null", cache.remove("short") == null);
+        TestKit.check("remove of an expired entry still deletes it", cache.size() == 1);
+
+        LruCache<String, String> stats = new LruCache<>(3);
+        stats.put("k", "v");
+        stats.remove("k");
+        stats.remove("nothing");
+        TestKit.check("remove does not touch hit/miss statistics", stats.hitCount() == 0 && stats.missCount() == 0);
+
+        cache.put("c", "C");
+        cache.put("d", "D");
+        cache.put("e", "E"); // capacity 3: b, c, d, e would be 4 -> b evicted
+        TestKit.check("a freed slot is reusable without premature eviction",
+                cache.size() == 3 && cache.get("b") == null && "E".equals(cache.get("e")));
+    }
+
+    private static void testComputeIfAbsent() throws Exception {
+        LruCache<String, Integer> cache = new LruCache<>(5);
+        int[] calls = {0};
+
+        Integer first = cache.computeIfAbsent("k", key -> { calls[0]++; return 42; });
+        Integer second = cache.computeIfAbsent("k", key -> { calls[0]++; return 99; });
+        TestKit.check("computeIfAbsent computes and returns the value on a miss", first == 42);
+        TestKit.check("computeIfAbsent returns the cached value on a hit", second == 42);
+        TestKit.check("loader runs only once for a cached key", calls[0] == 1);
+        TestKit.check("computeIfAbsent counts one miss then one hit",
+                cache.missCount() == 1 && cache.hitCount() == 1);
+        TestKit.check("computed value is visible to get", Integer.valueOf(42).equals(cache.get("k")));
+
+        LruCache<String, Integer> nulls = new LruCache<>(5);
+        int[] nullCalls = {0};
+        TestKit.check("a null loader result is returned as null",
+                nulls.computeIfAbsent("n", key -> { nullCalls[0]++; return null; }) == null);
+        nulls.computeIfAbsent("n", key -> { nullCalls[0]++; return null; });
+        TestKit.check("a null loader result is not cached (loader runs again)", nullCalls[0] == 2 && nulls.size() == 0);
+
+        LruCache<String, Integer> thrower = new LruCache<>(5);
+        boolean threw = false;
+        try {
+            thrower.computeIfAbsent("x", key -> { throw new IllegalStateException("boom"); });
+        } catch (IllegalStateException expected) {
+            threw = true;
+        }
+        TestKit.check("a loader exception propagates and stores nothing", threw && thrower.size() == 0);
+
+        LruCache<String, Integer> ttl = new LruCache<>(5);
+        int[] ttlCalls = {0};
+        ttl.computeIfAbsent("t", key -> { ttlCalls[0]++; return 1; }, 30L);
+        Thread.sleep(80);
+        ttl.computeIfAbsent("t", key -> { ttlCalls[0]++; return 2; }, 30L);
+        TestKit.check("an expired entry is recomputed with the explicit TTL overload", ttlCalls[0] == 2);
+
+        LruCache<String, Integer> defaults = new LruCache<>(5, 30L);
+        defaults.computeIfAbsent("d", key -> 1);
+        Thread.sleep(80);
+        TestKit.check("the two-argument overload applies the cache's default TTL",
+                Integer.valueOf(2).equals(defaults.computeIfAbsent("d", key -> 2)));
+
+        boolean npe = false;
+        try {
+            cache.computeIfAbsent("q", null);
+        } catch (NullPointerException expected) {
+            npe = true;
+        }
+        TestKit.check("a null loader is rejected", npe);
+    }
+
+    private static void testComputeIfAbsentRunsLoaderOnceUnderContention() throws Exception {
+        LruCache<String, Integer> cache = new LruCache<>(10);
+        java.util.concurrent.atomic.AtomicInteger loads = new java.util.concurrent.atomic.AtomicInteger();
+        int threadCount = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threadCount);
+        for (int t = 0; t < threadCount; t++) {
+            pool.submit(() -> {
+                try {
+                    start.await();
+                    cache.computeIfAbsent("shared", key -> {
+                        loads.incrementAndGet();
+                        try {
+                            Thread.sleep(20);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        return 7;
+                    });
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+        start.countDown();
+        boolean finished = done.await(30, TimeUnit.SECONDS);
+        pool.shutdown();
+        TestKit.check("all contending threads finish", finished);
+        TestKit.check("the loader runs exactly once for concurrent callers of one key", loads.get() == 1);
+    }
+
+    private static void testKeysIsAnOrderedSideEffectFreeSnapshot() throws Exception {
+        LruCache<String, String> cache = new LruCache<>(3);
+        cache.put("a", "A");
+        cache.put("b", "B");
+        cache.put("c", "C");
+        cache.get("a"); // recency, LRU..MRU: b, c, a
+
+        java.util.List<String> keys = cache.keys();
+        TestKit.check("keys() lists live keys from least- to most-recently-used",
+                keys.equals(java.util.Arrays.asList("b", "c", "a")));
+        TestKit.check("keys() does not touch hit/miss statistics", cache.hitCount() == 1 && cache.missCount() == 0);
+
+        keys.clear();
+        TestKit.check("the returned list is a copy detached from the cache", cache.keys().size() == 3);
+
+        cache.put("d", "D"); // must evict "b": keys() must not have promoted anything
+        TestKit.check("keys() did not change recency (the true LRU entry is evicted)",
+                cache.get("b") == null && "C".equals(cache.get("c")));
+
+        LruCache<String, String> expiring = new LruCache<>(3);
+        expiring.put("live", "1");
+        expiring.put("dead", "2", 30L);
+        Thread.sleep(80);
+        TestKit.check("keys() skips expired entries", expiring.keys().equals(java.util.Arrays.asList("live")));
     }
 }
